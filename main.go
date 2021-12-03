@@ -17,6 +17,7 @@ import (
 
 	"github.com/lxn/walk"
 	"github.com/lxn/walk/declarative"
+	"golang.org/x/sys/windows/registry"
 )
 
 //go:embed _putty.exe
@@ -153,6 +154,8 @@ func startConnectToSSH(mw *walk.MainWindow, ok chan struct{}, address, username,
 		if p, err := os.StartProcess(
 			filepath.Base(getEmbedPath("exe")),
 			[]string{
+				"putty",
+				"-load", "putty_autologin",
 				"-ssh",
 				"-l", username,
 				"-pw", password,
@@ -239,6 +242,7 @@ func startConnectToTelnet(mw *walk.MainWindow, ok chan struct{}, address, userna
 				filepath.Base(getEmbedPath("exe")),
 				[]string{
 					"putty",
+					"-load", "putty_autologin",
 					"-telnet",
 					"-P", fmt.Sprint(port),
 					"127.0.0.1",
@@ -311,6 +315,11 @@ func main() {
 	var chkbox *walk.CheckBox
 	//
 	var btnCC *walk.PushButton
+	//
+	if key, _, err := registry.CreateKey(registry.CURRENT_USER, "Software\\SimonTatham\\PuTTY\\Sessions\\putty_autologin", registry.ALL_ACCESS); nil == err {
+		//
+		key.SetDWordValue("CloseOnExit", 0x0)
+	}
 	//
 	declarative.MainWindow{
 		AssignTo: &mw,
