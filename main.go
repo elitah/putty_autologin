@@ -3,7 +3,6 @@ package main
 import (
 	_ "embed"
 
-	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -87,27 +86,40 @@ func getEmbedPath(format string) string {
 	return *embedPath
 }
 
-func submitUsernameAndPassword(conn net.Conn, username, password string) bool {
+func setTCPSmart(conns ...net.Conn) {
 	//
-	br := bufio.NewReader(conn)
+	for i, _ := range conns {
+		//
+		if _conn, ok := conns[i].(*net.TCPConn); ok {
+			//
+			_conn.SetNoDelay(true)
+			//
+			_conn.SetReadBuffer(0)
+			_conn.SetWriteBuffer(0)
+		}
+	}
+}
+
+func submitUsernameAndPassword(conn, tconn net.Conn, username, password string) bool {
+	//
+	var buffer [1024]byte
 	//
 	defer conn.SetReadDeadline(time.Time{})
-	//
-	username = fmt.Sprintf("%s\n", username)
-	password = fmt.Sprintf("%s\n", password)
 	//
 	for {
 		//
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		//
-		if data, err := br.ReadSlice(0x20); nil == err {
+		if n, err := conn.Read(buffer[:]); nil == err {
 			//
-			if strings.HasSuffix(string(data), "ogin: ") {
+			tconn.Write(buffer[:n])
+			//
+			if strings.HasSuffix(string(buffer[:n]), "ogin: ") {
 				//
-				conn.Write([]byte(username))
-			} else if strings.HasSuffix(string(data), "assword: ") {
+				conn.Write([]byte(username + "\n"))
+			} else if strings.HasSuffix(string(buffer[:n]), "assword: ") {
 				//
-				conn.Write([]byte(password))
+				conn.Write([]byte(password + "\n"))
 				//
 				return true
 			}
@@ -202,7 +214,9 @@ func startConnectToTelnet(mw *walk.MainWindow, ok chan struct{}, address, userna
 							//
 							if remote, err := net.DialTimeout("tcp4", address, 5*time.Second); nil == err {
 								//
-								if submitUsernameAndPassword(remote, username, password) {
+								setTCPSmart(local, remote)
+								//
+								if submitUsernameAndPassword(remote, local, username, password) {
 									//
 									fast_io.FastCopy(local, remote)
 								}
