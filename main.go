@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/elitah/fast-io"
@@ -26,8 +28,59 @@ var putty []byte
 var (
 	mu sync.Mutex
 
+	hKernel32 uintptr
+
 	puttyPath string
 )
+
+func init() {
+	//
+	if h, err := syscall.LoadLibrary("kernel32.dll"); nil == err {
+		//
+		atomic.StoreUintptr(&hKernel32, uintptr(h))
+	} else {
+		//
+		fmt.Println(err)
+	}
+}
+
+func loadKernel32() (syscall.Handle, error) {
+	//
+	if p := atomic.LoadUintptr(&hKernel32); 0 != p {
+		//
+		return syscall.Handle(p), nil
+	} else {
+		//
+		return syscall.Handle(0), fmt.Errorf("no such library")
+	}
+}
+
+func lockFile(fd uintptr) (ret bool) {
+	//
+	if h, err := loadKernel32(); nil == err {
+		//
+		if addr, err := syscall.GetProcAddress(h, "LockFile"); nil == err {
+			//
+			r0, _, _ := syscall.Syscall6(addr, 5, fd, 0, 0, 0, 1, 0)
+			//
+			ret = 0 != int(r0)
+		}
+	}
+	//
+	return ret
+}
+
+func testFileIsLocked(path string) (ret bool) {
+	//
+	if f, err := os.Open(path); nil == err {
+		//
+		ret = !lockFile(f.Fd())
+		//
+		f.Close()
+	}
+	//
+	return
+}
 
 func getEmbedPath(format string) string {
 	//
@@ -59,7 +112,10 @@ func getEmbedPath(format string) string {
 				//
 				for _, item := range list {
 					//
-					os.Remove(item)
+					if !testFileIsLocked(item) {
+						//
+						os.Remove(item)
+					}
 				}
 			}
 		}
@@ -308,6 +364,8 @@ func main() {
 	const WINDOW_HEIGHT = 100
 	const WINDOW_WIDTH = 200
 	//
+	var fLock *os.File
+	//
 	var mw *walk.MainWindow
 	//
 	var inLE1, inLE2, inLE3 *walk.LineEdit
@@ -315,11 +373,6 @@ func main() {
 	var chkbox *walk.CheckBox
 	//
 	var btnCC *walk.PushButton
-	//
-	if key, _, err := registry.CreateKey(registry.CURRENT_USER, "Software\\SimonTatham\\PuTTY\\Sessions\\putty_autologin", registry.ALL_ACCESS); nil == err {
-		//
-		key.SetDWordValue("CloseOnExit", 0x0)
-	}
 	//
 	declarative.MainWindow{
 		AssignTo: &mw,
@@ -360,6 +413,12 @@ func main() {
 					//
 					btnCC.SetEnabled(false)
 					//
+					if key, _, err := registry.CreateKey(registry.CURRENT_USER, "Software\\SimonTatham\\PuTTY\\Sessions\\putty_autologin", registry.ALL_ACCESS); nil == err {
+						//
+						key.SetDWordValue("CloseOnExit", 0x0)
+						key.SetStringValue("WinTitle", inLE1.Text())
+					}
+					//
 					go startConnectTo(mw, ok, chkbox.Checked(), inLE1.Text(), inLE2.Text(), inLE3.Text())
 					//
 					go func() {
@@ -386,21 +445,32 @@ func main() {
 		Height: WINDOW_HEIGHT,
 	})
 	//
-	if icon, err := walk.NewIconFromResourceId(3); nil == err {
-		//
-		mw.SetIcon(icon)
-	} else {
-		//
-		fmt.Println(err)
-	}
-	//
 	mw.SetVisible(true)
 	//
 	inLE1.SetText("192.168.88.88:23")
 	inLE2.SetText("root")
 	inLE3.SetText("Li$tpArp123?")
 	//
+	if path := getEmbedPath("exe"); "" != path {
+		//
+		if f, err := os.Open(path); nil == err {
+			//
+			if lockFile(f.Fd()) {
+				//
+				fLock = f
+			} else {
+				//
+				f.Close()
+			}
+		}
+	}
+	//
 	mw.Run()
+	//
+	if nil != fLock {
+		//
+		fLock.Close()
+	}
 	//
 	mu.Lock()
 	//
