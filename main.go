@@ -187,13 +187,21 @@ func submitUsernameAndPassword(conn, tconn net.Conn, username, password string) 
 	}
 }
 
-func startConnectToSSH(mw *walk.MainWindow, ok chan struct{}, address, username, password string) {
+func startConnectToSSH(mw *walk.MainWindow, ok chan struct{}, address, username, password string, ip ...*string) {
 	//
 	if conn, err := net.DialTimeout("tcp4", address, 5*time.Second); nil == err {
 		//
 		var remote string
 		//
 		var port int
+		//
+		if 0 < len(ip) && nil != ip[0] {
+			//
+			if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+				//
+				*ip[0] = addr.IP.String()
+			}
+		}
 		//
 		if v := conn.RemoteAddr(); nil != v {
 			//
@@ -239,9 +247,17 @@ func startConnectToSSH(mw *walk.MainWindow, ok chan struct{}, address, username,
 	close(ok)
 }
 
-func startConnectToTelnet(mw *walk.MainWindow, ok chan struct{}, address, username, password string) {
+func startConnectToTelnet(mw *walk.MainWindow, ok chan struct{}, address, username, password string, ip ...*string) {
 	//
 	if conn, err := net.DialTimeout("tcp4", address, 5*time.Second); nil == err {
+		//
+		if 0 < len(ip) && nil != ip[0] {
+			//
+			if addr, ok := conn.LocalAddr().(*net.TCPAddr); ok {
+				//
+				*ip[0] = addr.IP.String()
+			}
+		}
 		//
 		conn.Close()
 		//
@@ -251,12 +267,9 @@ func startConnectToTelnet(mw *walk.MainWindow, ok chan struct{}, address, userna
 			//
 			var wg sync.WaitGroup
 			//
-			if v := l.Addr(); nil != v {
+			if addr, ok := l.Addr().(*net.TCPAddr); ok {
 				//
-				if addr, ok := v.(*net.TCPAddr); ok {
-					//
-					port = addr.Port
-				}
+				port = addr.Port
 			}
 			//
 			go func(wg *sync.WaitGroup, l net.Listener) {
@@ -332,7 +345,7 @@ func startConnectToTelnet(mw *walk.MainWindow, ok chan struct{}, address, userna
 	close(ok)
 }
 
-func startConnectTo(mw *walk.MainWindow, ok chan struct{}, ssh bool, address, username, password string) {
+func startConnectTo(mw *walk.MainWindow, ok chan struct{}, ssh bool, address, username, password string, ip ...*string) {
 	//
 	host, port, _ := net.SplitHostPort(address)
 	//
@@ -352,10 +365,10 @@ func startConnectTo(mw *walk.MainWindow, ok chan struct{}, ssh bool, address, us
 	//
 	if ssh {
 		//
-		startConnectToSSH(mw, ok, address, username, password)
+		startConnectToSSH(mw, ok, address, username, password, ip...)
 	} else {
 		//
-		startConnectToTelnet(mw, ok, address, username, password)
+		startConnectToTelnet(mw, ok, address, username, password, ip...)
 	}
 }
 
@@ -370,7 +383,7 @@ func main() {
 	//
 	var inLE1, inLE2, inLE3 *walk.LineEdit
 	//
-	var chkbox *walk.CheckBox
+	var chkbox, chkbox1 *walk.CheckBox
 	//
 	var btnCC *walk.PushButton
 	//
@@ -404,10 +417,25 @@ func main() {
 					}
 				},
 			},
+			declarative.Label{Text: "其他选项:"},
+			declarative.CheckBox{
+				AssignTo: &chkbox1,
+				Text:     "启动HTTP代理服务器                 ",
+				OnCheckedChanged: func() {
+					//
+					if chkbox1.Checked() {
+						//
+					} else {
+						//
+					}
+				},
+			},
 			declarative.PushButton{
 				AssignTo: &btnCC,
 				Text:     "开始连接",
 				OnClicked: func() {
+					//
+					var ip string
 					//
 					ok := make(chan struct{})
 					//
@@ -419,13 +447,18 @@ func main() {
 						key.SetStringValue("WinTitle", inLE1.Text())
 					}
 					//
-					go startConnectTo(mw, ok, chkbox.Checked(), inLE1.Text(), inLE2.Text(), inLE3.Text())
+					go startConnectTo(mw, ok, chkbox.Checked(), inLE1.Text(), inLE2.Text(), inLE3.Text(), &ip)
 					//
 					go func() {
 						//
 						<-ok
 						//
 						btnCC.SetEnabled(true)
+						//
+						if chkbox1.Checked() {
+							//
+							walk.MsgBox(mw, "提示", fmt.Sprintf("本地地址为%s", ip), walk.MsgBoxIconInformation)
+						}
 					}()
 				},
 			},
