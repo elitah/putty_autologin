@@ -3,8 +3,19 @@ package main
 import (
 	_ "embed"
 
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"io"
+	"math/big"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +28,7 @@ import (
 
 	"github.com/lxn/win"
 
+	"github.com/elazarl/goproxy"
 	"github.com/lxn/walk"
 	"github.com/lxn/walk/declarative"
 	"golang.org/x/sys/windows/registry"
@@ -31,6 +43,22 @@ var (
 	hKernel32 uintptr
 
 	puttyPath string
+
+	tlsCfg *tls.Config
+
+	proxyMsg = `已开启HTTP代理服务器，请使用%s:%d进行连接
+
+Linux环境请设置环境变量：
+export http_proxy=http://%s:%d
+
+如果您的设备不支持https连接，可使用前缀
+http://https2http/
+进行代理连接
+
+例如访问https://www.baidu.com/
+只需将https://替换为http://https2http/即可
+（即http://http2http/www.baidu.com/）
+`
 )
 
 func init() {
@@ -38,6 +66,63 @@ func init() {
 	if h, err := syscall.LoadLibrary("kernel32.dll"); nil == err {
 		//
 		atomic.StoreUintptr(&hKernel32, uintptr(h))
+	} else {
+		//
+		fmt.Println(err)
+	}
+	//
+	if key, err := rsa.GenerateKey(rand.Reader, 2048); nil == err {
+		//
+		template := x509.Certificate{
+			SerialNumber: big.NewInt(1),
+			Subject: pkix.Name{
+				CommonName: "http proxy",
+			},
+			NotBefore: time.Now(),
+			NotAfter:  time.Date(2099, time.December, 31, 15, 59, 59, 1e9-1, time.UTC),
+
+			KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+			BasicConstraintsValid: true,
+
+			DNSNames: []string{"*"},
+		}
+		//
+		if data, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key); nil == err {
+			//
+			out1, out2 := &bytes.Buffer{}, &bytes.Buffer{}
+			//
+			pem.Encode(
+				out1,
+				&pem.Block{
+					Type:  "CERTIFICATE",
+					Bytes: data,
+				},
+			)
+			//
+			pem.Encode(
+				out2,
+				&pem.Block{
+					Type:  "RSA PRIVATE KEY",
+					Bytes: x509.MarshalPKCS1PrivateKey(key),
+				},
+			)
+			//
+			if c, err := tls.X509KeyPair(out1.Bytes(), out2.Bytes()); nil == err {
+				//
+				tlsCfg = &tls.Config{
+					Certificates: []tls.Certificate{
+						c,
+					},
+				}
+			} else {
+				//
+				fmt.Println(err)
+			}
+		} else {
+			//
+			fmt.Println(err)
+		}
 	} else {
 		//
 		fmt.Println(err)
@@ -372,6 +457,140 @@ func startConnectTo(mw *walk.MainWindow, ok chan struct{}, ssh bool, address, us
 	}
 }
 
+type wrapConn struct {
+	sync.Mutex
+
+	net.Conn
+
+	b *bytes.Buffer
+
+	f int32
+}
+
+func NewWrapConn(conn net.Conn, args ...int) *wrapConn {
+	//
+	size := 4 * 1024
+	//
+	for _, item := range args {
+		//
+		if 0 < item {
+			//
+			size = item
+		}
+	}
+	//
+	return &wrapConn{
+		Conn: conn,
+		b:    bytes.NewBuffer(make([]byte, 0, size)),
+	}
+}
+
+func (this *wrapConn) PourOut() {
+	//
+	atomic.StoreInt32(&this.f, 0x1)
+}
+
+func (this *wrapConn) Read(p []byte) (n int, err error) {
+	//
+	if 0x0 == atomic.LoadInt32(&this.f) {
+		//
+		n, err = this.Conn.Read(p)
+		//
+		if 0 < n {
+			//
+			this.b.Write(p[:n])
+		}
+	} else {
+		//
+		this.Lock()
+		defer this.Unlock()
+		//
+		if nil == this.b {
+			//
+			n, err = this.Conn.Read(p)
+		} else {
+			//
+			n, err = this.b.Read(p)
+			//
+			if err == io.EOF {
+				//
+				var _n int
+				//
+				this.b = nil
+				//
+				_n, err = this.Conn.Read(p[n:])
+				//
+				n += _n
+			}
+		}
+	}
+	//
+	return
+}
+
+func (this *wrapConn) Close() error {
+	//
+	return this.Conn.Close()
+}
+
+type muxListener struct {
+	net.Listener
+
+	c chan net.Conn
+
+	err error
+}
+
+func (this *muxListener) Accept() (net.Conn, error) {
+	//
+	for conn := range this.c {
+		//
+		return conn, nil
+	}
+	//
+	return nil, this.err
+}
+
+func (this *muxListener) handshake(conn net.Conn) {
+	//
+	wconn := NewWrapConn(conn)
+	//
+	sconn := tls.Server(wconn, tlsCfg)
+	//
+	if err := sconn.Handshake(); nil == err {
+		//
+		this.c <- sconn
+	} else if _, ok := err.(tls.RecordHeaderError); ok {
+		//
+		wconn.PourOut()
+		//
+		this.c <- wconn
+	} else {
+		//
+		fmt.Printf("%T, %v\n", err, err)
+		//
+		sconn.Close()
+	}
+}
+
+func (this *muxListener) loop() {
+	//
+	for {
+		//
+		if conn, err := this.Listener.Accept(); nil == err {
+			//
+			go this.handshake(conn)
+		} else {
+			//
+			this.err = err
+			//
+			close(this.c)
+			//
+			return
+		}
+	}
+}
+
 func main() {
 	//
 	const WINDOW_HEIGHT = 100
@@ -386,6 +605,8 @@ func main() {
 	var chkbox, chkbox1 *walk.CheckBox
 	//
 	var btnCC *walk.PushButton
+	//
+	var ls net.Listener
 	//
 	declarative.MainWindow{
 		AssignTo: &mw,
@@ -457,7 +678,112 @@ func main() {
 						//
 						if chkbox1.Checked() {
 							//
-							walk.MsgBox(mw, "提示", fmt.Sprintf("本地地址为%s", ip), walk.MsgBoxIconInformation)
+							if nil == ls {
+								//
+								if l, err := net.Listen("tcp4", ":0"); nil == err {
+									//
+									ls = l
+								}
+							}
+							//
+							if nil != ls {
+								//
+								if addr, ok := ls.Addr().(*net.TCPAddr); ok {
+									//
+									go func(l net.Listener) {
+										//
+										proxy := goproxy.NewProxyHttpServer()
+										//
+										proxy.OnRequest(
+											goproxy.DstHostIs("https2http"),
+										).DoFunc(func(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+											//
+											switch r.URL.Path {
+											case "/":
+											case "/favicon.ico":
+												//
+												return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusNotFound, "Not Found")
+											default:
+												//
+												ss := strings.SplitN(r.URL.Path[1:], "/", 2)
+												//
+												if n := len(ss); 1 <= n {
+													//
+													u := url.URL{
+														Scheme:   "https",
+														User:     r.URL.User,
+														Host:     ss[0],
+														RawQuery: r.URL.RawQuery,
+														Fragment: r.URL.Fragment,
+													}
+													//
+													if 2 <= n && "" != ss[1] {
+														//
+														u.Path = ss[1]
+													} else {
+														//
+														u.Path = "/"
+													}
+													//
+													if req, err := http.NewRequest(r.Method, u.String(), r.Body); nil == err {
+														//
+														for key, values := range r.Header {
+															//
+															if "Host" == key {
+																//
+																continue
+															}
+															//
+															for _, v := range values {
+																//
+																req.Header.Add(key, v)
+															}
+														}
+														//
+														if resp, err := http.DefaultClient.Do(req); nil == err {
+															//
+															return req, resp
+														} else {
+															//
+															return req, goproxy.NewResponse(req, goproxy.ContentTypeText, http.StatusBadGateway, err.Error())
+														}
+													} else {
+														//
+														return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusServiceUnavailable, err.Error())
+													}
+												}
+											}
+											//
+											return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusBadRequest, "Unable get hostname from path")
+										})
+										//
+										ll := &muxListener{
+											Listener: l,
+											c:        make(chan net.Conn),
+										}
+										//
+										go ll.loop()
+										//
+										http.Serve(ll, proxy)
+									}(ls)
+									//
+									walk.MsgBox(
+										mw,
+										"提示",
+										fmt.Sprintf(
+											proxyMsg,
+											ip,
+											addr.Port,
+											ip,
+											addr.Port,
+										),
+										walk.MsgBoxIconInformation,
+									)
+								} else {
+									//
+									ls.Close()
+								}
+							}
 						}
 					}()
 				},
