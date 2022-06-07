@@ -7,6 +7,7 @@ add automatic login for putty
 `go mod tidy && go fmt && go build`  
 * 发布for product  
 `go mod tidy && go fmt && go build -ldflags "-w -s -H windowsgui" && upx -9 putty_autologin.exe`  
+* 关于如何在Linux下编译，请参考我的另一个repository[跳转到](https://github.com/elitah/webvnc/tree/main/docker)
 
 # 修改图标modify logo
 * 安装rsrc  
